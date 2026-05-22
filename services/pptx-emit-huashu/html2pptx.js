@@ -188,6 +188,24 @@ function addElements(slideData, targetSlide, pres) {
       if (el.shape.shadow) shapeOptions.shadow = el.shape.shadow;
 
       targetSlide.addText(el.text || '', shapeOptions);
+    } else if (el.type === 'triangle') {
+      // CSS-borders triangle detected in DOM walker. Emit a real
+      // pptxgenjs triangle shape with rotation per the direction the
+      // colored border was on.
+      const fill = { color: el.triangle.color };
+      if (el.triangle.transparency != null) {
+        fill.transparency = el.triangle.transparency;
+      }
+      const rotateMap = { up: 0, right: 90, down: 180, left: 270 };
+      targetSlide.addShape(pres.ShapeType.triangle, {
+        x: el.position.x,
+        y: el.position.y,
+        w: el.position.w,
+        h: el.position.h,
+        fill,
+        line: { type: 'none' },
+        rotate: rotateMap[el.triangle.direction] || 0,
+      });
     } else if (el.type === 'list') {
       const listOptions = {
         x: el.position.x,
@@ -671,6 +689,62 @@ async function extractSlideData(page) {
         const hasBorder = borders.some(b => b > 0);
         const hasUniformBorder = hasBorder && borders.every(b => b === borders[0]);
         const borderLines = [];
+
+        // CSS-borders triangle trick: one border is zero-width, the
+        // opposite border is colored, the two perpendicular borders are
+        // transparent. Common LLM-generated slide pattern (.deco-triangle).
+        // We identify it purely from the border pattern — `box-sizing:
+        // border-box` (common on slide decks) stretches width/height past
+        // the declared 0 to fit the borders, so we can't rely on content
+        // dimensions being zero.
+        if (hasBorder && !hasBg) {
+          const isTransp = (c) => !c || c === 'rgba(0, 0, 0, 0)' || c === 'transparent';
+          const bcTop = computed.borderTopColor;
+          const bcRight = computed.borderRightColor;
+          const bcBottom = computed.borderBottomColor;
+          const bcLeft = computed.borderLeftColor;
+          const [btw, brw, bbw, blw] = borders;
+          let triangle = null;
+          // Up: top=0, bottom colored, left+right transparent
+          if (btw === 0 && bbw > 0 && blw > 0 && brw > 0 &&
+              isTransp(bcLeft) && isTransp(bcRight) && !isTransp(bcBottom)) {
+            triangle = { direction: 'up', color: bcBottom, w: blw + brw, h: bbw };
+          }
+          // Down: bottom=0, top colored, left+right transparent
+          else if (bbw === 0 && btw > 0 && blw > 0 && brw > 0 &&
+                   isTransp(bcLeft) && isTransp(bcRight) && !isTransp(bcTop)) {
+            triangle = { direction: 'down', color: bcTop, w: blw + brw, h: btw };
+          }
+          // Right: right=0, left colored, top+bottom transparent
+          else if (brw === 0 && blw > 0 && btw > 0 && bbw > 0 &&
+                   isTransp(bcTop) && isTransp(bcBottom) && !isTransp(bcLeft)) {
+            triangle = { direction: 'right', color: bcLeft, w: blw, h: btw + bbw };
+          }
+          // Left: left=0, right colored, top+bottom transparent
+          else if (blw === 0 && brw > 0 && btw > 0 && bbw > 0 &&
+                   isTransp(bcTop) && isTransp(bcBottom) && !isTransp(bcRight)) {
+            triangle = { direction: 'left', color: bcRight, w: brw, h: btw + bbw };
+          }
+          if (triangle) {
+            const rect = el.getBoundingClientRect();
+            elements.push({
+              type: 'triangle',
+              position: {
+                x: pxToInch(rect.left),
+                y: pxToInch(rect.top),
+                w: pxToInch(triangle.w),
+                h: pxToInch(triangle.h),
+              },
+              triangle: {
+                direction: triangle.direction,
+                color: rgbToHex(triangle.color),
+                transparency: extractAlpha(triangle.color),
+              },
+            });
+            processed.add(el);
+            return;
+          }
+        }
 
         if (hasBorder && !hasUniformBorder) {
           const rect = el.getBoundingClientRect();
